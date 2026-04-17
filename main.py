@@ -347,6 +347,26 @@ def _build_failure_reason_lines(send_results: list[Any], top_n: int = 5) -> list
     return lines
 
 
+def _extract_phone_lists(send_results: list[Any]) -> tuple[list[str], list[str]]:
+    """
+    从发送结果中提取成功和失败的手机号列表
+    返回: (成功手机号列表, 失败手机号列表)
+    """
+    success_phones = []
+    failed_phones = []
+    
+    for result in send_results:
+        phone = str(getattr(result, "phone", "")).strip()
+        status = str(getattr(result, "status", ""))
+        
+        if status in ("delivered", "sent_not_confirmed"):
+            success_phones.append(phone)
+        elif status == "failed":
+            failed_phones.append(phone)
+    
+    return success_phones, failed_phones
+
+
 def _build_dingtalk_markdown_report(
     *,
     batch_date: str,
@@ -408,6 +428,21 @@ def _build_dingtalk_markdown_report(
     else:
         markdown_lines.append("#### 失败原因（Top）")
         markdown_lines.append("- 本次无失败记录")
+    
+    markdown_lines.append("")
+
+    # 添加成功和失败手机号列表
+    success_phones, failed_phones = _extract_phone_lists(send_results)
+    
+    if success_phones:
+        markdown_lines.append("#### 成功手机号")
+        markdown_lines.append(f"`{', '.join(success_phones)}`")
+        markdown_lines.append("")
+    
+    if failed_phones:
+        markdown_lines.append("#### 失败手机号")
+        markdown_lines.append(f"`{', '.join(failed_phones)}`")
+        markdown_lines.append("")
 
     return title, "\n".join(markdown_lines)
 

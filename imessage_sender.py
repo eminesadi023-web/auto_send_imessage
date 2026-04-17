@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import requests
+
 try:
     from openai import OpenAI
 except Exception:  # pragma: no cover - 仅在未安装依赖时触发
@@ -58,19 +60,19 @@ class IMessageRiskControl:
     startup_delay_min_seconds: int = 20
     startup_delay_max_seconds: int = 90
     # 两次消息之间的最小、最大随机延迟
-    min_delay_between_messages_seconds: int = 35
-    max_delay_between_messages_seconds: int = 80
+    min_delay_between_messages_seconds: int = 60
+    max_delay_between_messages_seconds: int = 120
     # 每批次最大发送数量，及批次间的暂停范围（秒）
     batch_size: int = 5
-    batch_pause_min_seconds: int = 180
-    batch_pause_max_seconds: int = 420
+    batch_pause_min_seconds: int = 1800
+    batch_pause_max_seconds: int = 1800
     # 每日最多可发送消息数量
-    daily_limit: int = 20
+    daily_limit: int = 100
     # 同一手机号发送后冷却周期（小时）
     cooldown_hours: int = 72
     # 允许自动发送的时间窗口（小时）
-    active_hours_start: int = 9
-    active_hours_end: int = 20
+    active_hours_start: int = 0
+    active_hours_end: int = 24
 
 # 单个手机号的发送结果
 @dataclass(slots=True)
@@ -512,11 +514,6 @@ def _save_history(state_path: Path, payload: dict[str, list[dict[str, str]]]) ->
 
 # 检查当前是否在允许的自动发送窗口内
 def _can_send_now(rules: IMessageRiskControl, now: datetime) -> tuple[bool, str]:
-    if not (rules.active_hours_start <= now.hour < rules.active_hours_end):
-        return False, (
-            f"当前本地时间 {now.hour:02d}:00 不在允许自动发送时间段 "
-            f"{rules.active_hours_start:02d}:00-{rules.active_hours_end:02d}:00 内。"
-        )
     return True, ""
 
 # 从发送历史中提取24小时内消息及正在冷却的手机号集合
@@ -537,61 +534,29 @@ def _recent_history_entries(
     return recent_day_entries, cooling_down_phones
 
 # 构造AppleScript脚本用于直接向某手机号发送iMessage
-def _build_direct_send_script(phone: str, message: str) -> str:
-    escaped_phone = _escape_applescript_string(phone)
-    escaped_message = _escape_applescript_string(message)
-    return f'''
-set targetPhone to "{escaped_phone}"
-set messageText to "{escaped_message}"
 
--- 1. 将消息存入剪贴板，避免逐字输入导致的卡顿和丢包
-set the clipboard to messageText
-
-tell application "Messages" to activate
-
-tell application "System Events"
-    tell process "Messages"
-        -- 2. 开启新窗口
-        keystroke "n" using command down
-        delay 1.5
-        
-        -- 3. 输入手机号
-        keystroke targetPhone
-        delay 1
-        key code 36 -- Enter 确认号码
-        delay 1
-        key code 36 -- 再次 Enter 确保跳入消息框
-        delay 0.5
-        
-        -- 4. 使用 Cmd+V 瞬间粘贴长文本
-        keystroke "v" using command down
-        delay 0.5
-        
-        -- 5. 发送
-        key code 36 -- Enter 发送
-        delay 1
-    end tell
-end tell
-'''
 
 # 向指定手机号发送一条iMessage（底层调用AppleScript）
 def send_imessage_once(phone: str, message: str) -> None:
-    if sys.platform != "darwin":
-        raise IMessageSendError("仅支持在macOS下由本地脚本自动发送iMessage。")
-    if shutil.which("osascript") is None:
-        raise IMessageSendError("本机未找到 osascript，无法自动发送iMessage。")
+    url = "http://127.0.0.1:8787/send"
+    payload = {"recipient": phone, "message": message}
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise IMessageSendError(f"发送iMessage失败: {e}")
 
-    script = _build_direct_send_script(phone, message)
-    completed = subprocess.run(
-        ["osascript", "-e", script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        # 返回AppleScript错误信息
-        stderr = (completed.stderr or completed.stdout or "").strip()
-        raise IMessageSendError(stderr or f"osascript 非零退出码: {completed.returncode}")
+
+def send_imessage_batch(phones: list[str], message: str) -> None:
+    url = "http://127.0.0.1:8787/send/batch"
+    payload = {"recipients": phones, "message": message}
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise IMessageSendError(f"批量发送iMessage失败: {e}")
 
 # 带有防刷风控的iMessage批量发送主流程
 def send_imessages_with_risk_control(
