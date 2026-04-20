@@ -27,6 +27,21 @@ from lingxing_result import (
 )
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="通过 BlueBubbles 发送 iMessage")
+    subparsers = parser.add_subparsers(dest="command")
+
+    send_parser = subparsers.add_parser("send", help="发送单条 iMessage")
+    send_parser.add_argument("--recipient", required=True, help="目标号码或 iMessage 标识")
+    send_parser.add_argument("--message", default="", help="发送文案；未提供时使用 IMESSAGE_TEXT")
+    send_parser.add_argument("--batch-date", default="", help="可选：指定批次目录日期（YYYY-MM-DD）")
+
+    serve_parser = subparsers.add_parser("serve", help="启动本地 HTTP 服务")
+    serve_parser.add_argument("--host", default="", help="监听地址；未提供时使用 API_HOST")
+    serve_parser.add_argument("--port", default=0, type=int, help="监听端口；未提供时使用 API_PORT")
+    return parser
+
+
 def _parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="自动发送 iMessage（支持指定历史批次重跑）",
@@ -491,18 +506,30 @@ def _send_dingtalk_summary_if_configured(
 
 
 def main() -> int:
-    cli_args = _parse_cli_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.command == "serve":
+        return _run_serve_command(args)
+    elif args.command == "send":
+        return _run_send_command(args)
+    else:
+        cli_args = _parse_cli_args()
+        return _run_default_command(cli_args)
+
+
+def _run_default_command(cli_args: argparse.Namespace) -> int:
+    batch_dir: Path | None = None
+    recipients_count = 0
+    send_results: list[Any] = []
+    app_config: Any = APP_CONFIG
+    dingtalk_config: dict[str, str] | None = None
+
     try:
         config = load_runtime_config()
     except Exception as exc:  # noqa: BLE001
         print(f"配置读取失败: {exc}")
         return 2
 
-    batch_dir: Path | None = None
-    recipients_count = 0
-    send_results: list[Any] = []
-    app_config: Any = APP_CONFIG
-    dingtalk_config: dict[str, str] | None = None
     rerun_batch_date = _resolve_rerun_batch_date_from_sources(
         cli_args=cli_args,
     )
@@ -673,6 +700,36 @@ def main() -> int:
             except Exception as notify_exc:  # noqa: BLE001
                 print(f"钉钉失败通知发送失败: {notify_exc}")
         return 1
+
+def _run_serve_command(args: argparse.Namespace) -> int:
+    from api_server import run_api_server
+    app_config = APP_CONFIG
+    if args.host:
+        app_config = replace(app_config, api_host=args.host)
+    if args.port:
+        app_config = replace(app_config, api_port=args.port)
+    run_api_server(app_config)
+    return 0
+
+def _run_send_command(args: argparse.Namespace) -> int:
+    message = args.message.strip() or APP_CONFIG.imessage_text
+    batch_date = args.batch_date.strip() or None
+    results = send_imessages_with_risk_control(
+        [args.recipient.strip()],
+        message=message,
+        state_path=APP_CONFIG.imessage_state_path,
+        normalize_phone_numbers=False,
+        batch_root_dir=APP_CONFIG.imessage_batch_root_dir,
+        batch_date=batch_date,
+        delivery_check_timeout_seconds=APP_CONFIG.imessage_delivery_check_timeout_seconds,
+        delivery_check_interval_seconds=APP_CONFIG.imessage_delivery_check_interval_seconds,
+    )
+    for result in results:
+        if result.error:
+            print(f"[{result.status}] {result.phone} - {result.detail} (error={result.error})")
+        else:
+            print(f"[{result.status}] {result.phone} - {result.detail}")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

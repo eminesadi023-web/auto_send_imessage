@@ -23,9 +23,58 @@ except Exception:  # pragma: no cover - 仅在未安装依赖时触发
 class IMessageSendError(RuntimeError):
     """当iMessage发送失败时抛出该异常"""
 
+
 def _escape_applescript_string(value: str) -> str:
     """对AppleScript字符串进行转义"""
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_attachment_path(attachment: str) -> str:
+    attachment_path = Path(attachment).expanduser()
+    if not attachment_path.is_absolute():
+        attachment_path = Path(__file__).resolve().parent / attachment_path
+    attachment_path = attachment_path.resolve()
+    if not attachment_path.exists():
+        raise IMessageSendError(f"图片文件不存在: {attachment_path}")
+    return str(attachment_path)
+
+
+def _send_imessage_script(phone: str, message: str | None = None, attachment: str | None = None) -> str:
+    """构造 AppleScript 发送 iMessage，支持文本和附件"""
+    escaped_phone = _escape_applescript_string(phone)
+    script = f'''
+tell application "Messages"
+    set targetService to 1st service whose service type = iMessage
+    set targetBuddy to buddy "{escaped_phone}" of targetService
+'''
+    if attachment:
+        escaped_attachment = _escape_applescript_string(_normalize_attachment_path(attachment))
+        script += f'    send (POSIX file "{escaped_attachment}") to targetBuddy\n'
+    if message:
+        escaped_message = _escape_applescript_string(message)
+        script += f'    send "{escaped_message}" to targetBuddy\n'
+    script += 'end tell'
+    return script
+
+
+def _send_imessage_direct(phone: str, message: str | None = None, attachment: str | None = None) -> None:
+    """直接使用AppleScript发送iMessage"""
+    if sys.platform != "darwin":
+        raise IMessageSendError("iMessage发送仅支持macOS")
+    ensure_contact_exists(phone)
+    time.sleep(1)
+    script = _send_imessage_script(phone, message, attachment)
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise IMessageSendError("发送iMessage超时：AppleScript 在 30 秒内未完成。") from e
+    except subprocess.CalledProcessError as e:
+        raise IMessageSendError(f"发送iMessage失败: {e.stderr.decode('utf-8', errors='ignore')}")
 
 def _add_to_contacts_script(phone: str, name: str = "iMessage Customer") -> str:
     """构造 AppleScript 将手机号添加到通讯录，以提高 iMessage 发送成功率"""
@@ -48,8 +97,15 @@ def ensure_contact_exists(phone: str) -> bool:
         return False
     script = _add_to_contacts_script(phone)
     try:
-        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
         return True
+    except subprocess.TimeoutExpired:
+        return False
     except Exception:
         return False
 
@@ -537,32 +593,40 @@ def _recent_history_entries(
 
 
 # 向指定手机号发送一条iMessage（底层调用AppleScript）
-def send_imessage_once(phone: str, message: str) -> None:
-    url = "http://127.0.0.1:8787/send"
-    payload = {"recipient": phone, "message": message}
-    headers = {"Content-Type": "application/json"}
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise IMessageSendError(f"发送iMessage失败: {e}")
+def send_imessage_once(phone: str, message: str, attachment: str | None = None) -> None:
+    _send_imessage_direct(phone, message, attachment)
 
 
-def send_imessage_batch(phones: list[str], message: str) -> None:
-    url = "http://127.0.0.1:8787/send/batch"
-    payload = {"recipients": phones, "message": message}
-    headers = {"Content-Type": "application/json"}
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise IMessageSendError(f"批量发送iMessage失败: {e}")
+def send_imessages(
+    phones: list[str],
+    message: str = "Hi",
+    *,
+    attachment: str | None = None,
+    state_path: str | Path = ".imessage_send_history.json",
+    normalize_phone_numbers: bool = True,
+    batch_root_dir: str | Path = "imessage_batches",
+    batch_date: str | None = None,
+    delivery_check_timeout_seconds: int = 45,
+    delivery_check_interval_seconds: int = 3,
+) -> list[SendResult]:
+    return send_imessages_with_risk_control(
+        phones,
+        message,
+        attachment=attachment,
+        state_path=state_path,
+        normalize_phone_numbers=normalize_phone_numbers,
+        batch_root_dir=batch_root_dir,
+        batch_date=batch_date,
+        delivery_check_timeout_seconds=delivery_check_timeout_seconds,
+        delivery_check_interval_seconds=delivery_check_interval_seconds,
+    )
 
 # 带有防刷风控的iMessage批量发送主流程
 def send_imessages_with_risk_control(
     phones: list[str],
     message: str = "Hi",
     *,
+    attachment: str | None = None,
     dry_run: bool = False,
     rules: IMessageRiskControl | None = None,
     max_send_count: int | None = None,
@@ -687,7 +751,7 @@ def send_imessages_with_risk_control(
 
         attempted_at = _now_iso()
         message_to_send = message
-        if rewriter is not None:
+        if attachment is None and rewriter is not None:
             try:
                 message_to_send = rewriter.rewrite(message)
             except Exception as rewrite_exc:
@@ -716,7 +780,7 @@ def send_imessages_with_risk_control(
             ensure_contact_exists(phone)
             time.sleep(1)  # 给通讯录同步留一点点时间
 
-            send_imessage_once(phone, message_to_send)
+            send_imessage_once(phone, message_to_send, attachment)
             sent_in_this_run += 1
             # 记录本次发送历史
             history.setdefault("messages", []).append(

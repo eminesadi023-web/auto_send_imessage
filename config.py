@@ -14,6 +14,7 @@ class AppConfig:
     order_export_out: str = "订单管理导出.xlsx"
     print_request_debug: bool = True
     imessage_text: str = "Hi"
+    imessage_image_path: str = "img/send_img.png"
     imessage_llm_rewrite_enabled: bool = False
     openai_base_url: str | None = None
     openai_api_key: str | None = None
@@ -29,6 +30,8 @@ class AppConfig:
     imessage_delivery_check_interval_seconds: int = 3
     imessage_delivery_check_lookback_seconds: int = 600
     imessage_risk_control: IMessageRiskControl = field(default_factory=IMessageRiskControl)
+    api_host: str = "127.0.0.1"
+    api_port: int = 8787
 
 
 APP_CONFIG = AppConfig()
